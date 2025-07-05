@@ -32,34 +32,37 @@ const createRoom = asyncHandler(async (req, res) => {
 });
 
 /**
- * @description Gets details of a specific room if the user is a participant
+ * @description Gets details of a specific room. If the user is not a participant,
+ *              it adds them to the room automatically.
  * @param {object} req - Express request object. Contains roomId in params.
  * @param {object} res - Express response object
  * @returns {json} The room object with populated participant details
  */
 const getRoomDetails = asyncHandler(async (req, res) => {
     const { roomId } = req.params;
-    const room = await Room.findOne({ roomId }).populate({
-        path: 'participants.user',
-        select: 'username email' // Select fields to return for participants
-    }).populate('owner', 'username email');
+    let room = await Room.findOne({ roomId });
 
     if (!room) {
         throw new ApiError(404, "Room not found");
     }
 
-    // Check if the requesting user is a participant of the room
-    const isParticipant = room.participants.some(p => p.user._id.equals(req.user._id));
-
+    const isParticipant = room.participants.some(p => p.user.equals(req.user._id));
     if (!isParticipant) {
-        throw new ApiError(403, "Forbidden. You are not a member of this room.");
+        room.participants.push({ user: req.user._id, role: 'editor' }); // Default role for new joiners
+        await room.save();
+        console.log(`User ${req.user.username} was automatically added to room ${roomId}`);
     }
+
+    // Now, populate the details (including the potentially new user) and return.
+    const populatedRoom = await Room.findOne({ roomId }).populate({
+        path: 'participants.user',
+        select: 'username email' // Select fields to return for participants
+    }).populate('owner', 'username email');
 
     return res
         .status(200)
-        .json(new ApiResponse(200, room, "Room details fetched successfully"));
+        .json(new ApiResponse(200, populatedRoom, "Room details fetched successfully"));
 });
-
 /**
  * @description Gets all rooms for the logged-in user
  * @param {object} req - Express request object. User is attached.

@@ -39,6 +39,10 @@ const roomSchema = new Schema({
         type: String,
         default: `// Welcome to LiveCodeHub!\n// Start coding collaboratively.`
     },
+    lastModifiedBy: {
+        type: Schema.Types.ObjectId,
+        ref: 'User'
+    }
 }, { timestamps: true });
 
 export const Room = mongoose.model('Room', roomSchema);

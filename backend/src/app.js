@@ -6,7 +6,8 @@ import 'dotenv/config'; // Make sure dotenv is configured early
 const app = express();
 
 app.use(cors({
-    origin: process.env.CORS_ORIGIN,
+    // origin: process.env.CORS_ORIGIN,
+    origin: '*', // For development, you can use '*' but restrict in production
     credentials: true
 }));
 
