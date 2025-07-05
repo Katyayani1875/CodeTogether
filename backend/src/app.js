@@ -15,8 +15,8 @@ app.use(express.urlencoded({ extended: true, limit: "16kb" }));
 
 // --- THIS IS THE SECTION TO FIX ---
 // Make sure these imports have the .js extension
-import authRouter from './api/auth.routes.js';
-import roomRouter from './api/room.routes.js';
+import authRouter from './routes/auth.routes.js';
+import roomRouter from './routes/room.routes.js';
 
 // Routes declaration
 app.use("/api/v1/auth", authRouter);
