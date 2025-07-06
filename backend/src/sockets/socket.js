@@ -2,7 +2,8 @@
 import { Server } from 'socket.io';
 import registerRoomHandlers from './handlers/room.handler.js';
 import registerEditorHandlers from './handlers/editor.handler.js';
-import { verifySocketJWT } from '../middlewares/socket.middleware.js'; // --- NEW: Import middleware
+import { verifySocketJWT } from '../middlewares/socket.middleware.js'; 
+import registerChatHandlers from './handlers/chat.handler.js';
 
 export const initializeSocketIO = (server) => {
     const io = new Server(server, {
@@ -20,6 +21,7 @@ export const initializeSocketIO = (server) => {
 
         registerRoomHandlers(io, socket);
         registerEditorHandlers(io, socket);
+        registerChatHandlers(io, socket); 
 
         socket.on('disconnect', () => {
             console.log(`❌ User disconnected: ${socket.user.username} (Socket ID: ${socket.id})`);

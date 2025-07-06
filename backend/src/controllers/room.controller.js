@@ -9,21 +9,19 @@ import { ApiError } from '../utils/ApiError.js';
 
 /**
  * @description Creates a new collaborative room
- * @param {object} req - Express request object. User is attached from verifyJWT.
- * @param {object} res - Express response object
- * @returns {json} A new room object
  */
 const createRoom = asyncHandler(async (req, res) => {
-    const { name } = req.body;
+    // This controller is fine as it uses Room.create(), which triggers schema validation.
+    const { name, language } = req.body;
     const roomId = uuidV4();
     const owner = req.user._id;
 
-    // The creator is the owner and is automatically an editor.
     const newRoom = await Room.create({
         name: name || `Room-${roomId.split('-')[0]}`,
         roomId,
         owner,
-        participants: [{ user: owner, role: 'editor' }]
+        participants: [{ user: owner, role: 'editor' }], // pre-save hook will ensure this is valid
+        'settings.language': language || 'javascript'
     });
 
     return res
@@ -33,10 +31,7 @@ const createRoom = asyncHandler(async (req, res) => {
 
 /**
  * @description Gets details of a specific room. If the user is not a participant,
- *              it adds them to the room automatically.
- * @param {object} req - Express request object. Contains roomId in params.
- * @param {object} res - Express response object
- * @returns {json} The room object with populated participant details
+ *              it adds them to the room automatically using the model's method.
  */
 const getRoomDetails = asyncHandler(async (req, res) => {
     const { roomId } = req.params;
@@ -47,32 +42,39 @@ const getRoomDetails = asyncHandler(async (req, res) => {
     }
 
     const isParticipant = room.participants.some(p => p.user.equals(req.user._id));
+
     if (!isParticipant) {
-        room.participants.push({ user: req.user._id, role: 'editor' }); // Default role for new joiners
-        await room.save();
-        console.log(`User ${req.user.username} was automatically added to room ${roomId}`);
+        // --- REFACTORED: Use the custom model method ---
+        // This is safer as it uses the logic defined in your schema.
+        try {
+            await room.addParticipant(req.user._id, 'editor'); // Let's make new joiners editors
+            console.log(`User ${req.user.username} was automatically added to room ${roomId}`);
+        } catch (error) {
+            // This will catch errors like "User already in room" if there's a race condition.
+            console.error("Error adding participant:", error.message);
+            // We can ignore the error and proceed, as the user might have been added in another request.
+        }
     }
 
-    // Now, populate the details (including the potentially new user) and return.
+    // Now, populate the details and return.
     const populatedRoom = await Room.findOne({ roomId }).populate({
         path: 'participants.user',
-        select: 'username email' // Select fields to return for participants
-    }).populate('owner', 'username email');
+        select: 'username email avatar role' // Added avatar and role
+    }).populate('owner', 'username email avatar');
 
     return res
         .status(200)
         .json(new ApiResponse(200, populatedRoom, "Room details fetched successfully"));
 });
+
 /**
  * @description Gets all rooms for the logged-in user
- * @param {object} req - Express request object. User is attached.
- * @param {object} res - Express response object
- * @returns {json} An array of rooms the user is a part of
  */
 const getMyRooms = asyncHandler(async (req, res) => {
+    // This controller is fine, no changes needed.
     const rooms = await Room.find({ "participants.user": req.user._id })
         .populate('owner', 'username')
-        .sort({ createdAt: -1 });
+        .sort({ updatedAt: -1 }); // Sort by most recently active
 
     return res
         .status(200)
@@ -80,39 +82,29 @@ const getMyRooms = asyncHandler(async (req, res) => {
 });
 
 /**
- * @description Adds a user to a room. Only the room owner can perform this action.
- * @param {object} req - Express request object
- * @param {object} res - Express response object
- * @returns {json} Success message
+ * @description Adds a user to a room by the owner.
  */
 const addUserToRoom = asyncHandler(async (req, res) => {
     const { roomId } = req.params;
     const { email, role } = req.body;
 
     const room = await Room.findOne({ roomId });
+    if (!room) throw new ApiError(404, "Room not found");
 
-    if (!room) {
-        throw new ApiError(404, "Room not found");
-    }
-
-    // Authorization: Only the owner can add users
     if (!room.owner.equals(req.user._id)) {
         throw new ApiError(403, "Forbidden. Only the room owner can add users.");
     }
     
     const userToAdd = await User.findOne({ email });
-    if (!userToAdd) {
-        throw new ApiError(404, "User with this email not found");
-    }
+    if (!userToAdd) throw new ApiError(404, "User with this email not found");
 
-    // Check if user is already a participant
-    const isAlreadyParticipant = room.participants.some(p => p.user.equals(userToAdd._id));
-    if (isAlreadyParticipant) {
-        throw new ApiError(409, "User is already in this room.");
+    // --- REFACTORED: Use the custom model method ---
+    try {
+        await room.addParticipant(userToAdd._id, role || 'viewer');
+    } catch (error) {
+        // The model method throws an error if the user is already in the room.
+        throw new ApiError(409, error.message);
     }
-
-    room.participants.push({ user: userToAdd._id, role: role || 'viewer' });
-    await room.save();
 
     return res
         .status(200)
@@ -120,73 +112,90 @@ const addUserToRoom = asyncHandler(async (req, res) => {
 });
 
 /**
- * @description Removes a user from a room. Only the room owner can perform this.
- * @param {object} req - Express request object
- * @param {object} res - Express response object
- * @returns {json} Success message
+ * @description Removes a user from a room by the owner.
  */
 const removeUserFromRoom = asyncHandler(async (req, res) => {
     const { roomId } = req.params;
     const { userIdToRemove } = req.body;
 
-    if (!userIdToRemove) {
-        throw new ApiError(400, "User ID to remove is required.");
-    }
+    if (!userIdToRemove) throw new ApiError(400, "User ID to remove is required.");
 
     const room = await Room.findOne({ roomId });
-    if (!room) {
-        throw new ApiError(404, "Room not found");
-    }
+    if (!room) throw new ApiError(404, "Room not found");
 
-    // Authorization: Only the owner can remove users
     if (!room.owner.equals(req.user._id)) {
         throw new ApiError(403, "Forbidden. Only the room owner can remove users.");
     }
 
-    // The owner cannot remove themselves
-    if (room.owner.equals(userIdToRemove)) {
-        throw new ApiError(400, "The room owner cannot be removed.");
+    // --- REFACTORED: Use the custom model method ---
+    try {
+        await room.removeParticipant(userIdToRemove);
+    } catch (error) {
+        // The model method throws an error if trying to remove the owner.
+        throw new ApiError(400, error.message);
     }
-
-    // Pull the user from the participants array
-    room.participants = room.participants.filter(p => !p.user.equals(userIdToRemove));
-    await room.save();
     
     return res
         .status(200)
         .json(new ApiResponse(200, {}, "User removed from the room successfully"));
 });
 
+/**
+ * @description Updates the role of a participant in a room.
+ */
+const updateRole = asyncHandler(async (req, res) => {
+    const { roomId } = req.params;
+    const { userIdToUpdate, newRole } = req.body;
+
+    if (!userIdToUpdate || !newRole) {
+        throw new ApiError(400, "User ID and new role are required.");
+    }
+
+    const room = await Room.findOne({ roomId });
+    if (!room) throw new ApiError(404, "Room not found");
+
+    if (!room.owner.equals(req.user._id)) {
+        throw new ApiError(403, "Forbidden. Only the room owner can change roles.");
+    }
+    
+    // --- REFACTORED: Use the custom model method ---
+    try {
+        await room.updateParticipantRole(userIdToUpdate, newRole);
+    } catch (error) {
+        throw new ApiError(400, error.message);
+    }
+
+    return res
+        .status(200)
+        .json(new ApiResponse(200, {}, "Participant role updated successfully."));
+});
+
 
 /**
  * @description Exports the room's code as a ZIP file.
- * @param {object} req - Express request object
- * @param {object} res - Express response object
- * @returns {file} A zip file containing the code
  */
 const exportRoomAsZip = asyncHandler(async (req, res) => {
+    // This controller is fine, no refactoring needed as it's not modifying the room doc.
     const { roomId } = req.params;
     const room = await Room.findOne({ roomId });
 
-    if (!room) {
-        throw new ApiError(404, "Room not found");
-    }
+    if (!room) throw new ApiError(404, "Room not found");
 
-    // Authorization: Only participants can export
     const isParticipant = room.participants.some(p => p.user.equals(req.user._id));
-    if (!isParticipant) {
-        throw new ApiError(403, "Forbidden. You are not a member of this room.");
-    }
+    if (!isParticipant) throw new ApiError(403, "Forbidden. You are not a member of this room.");
 
     const archive = archiver('zip', { zlib: { level: 9 } });
+    const language = room.settings?.language || 'javascript';
+    const extensionMap = {
+        'javascript': 'js', 'python': 'py', 'java': 'java', 'c': 'c', 'cpp': 'cpp',
+        'html': 'html', 'css': 'css', 'typescript': 'ts'
+    };
+    const fileExtension = extensionMap[language] || 'txt';
+
 
     res.attachment(`${room.name.replace(/\s+/g, '_') || 'code'}.zip`);
     archive.pipe(res);
-
-    // In a future multi-file system, you would loop through files here.
-    // For now, we add the single `codeContent` field.
-    archive.append(room.codeContent, { name: 'code.js' }); // Assuming JS, can be dynamic later
-
+    archive.append(room.codeContent, { name: `main.${fileExtension}` });
     await archive.finalize();
 });
 
@@ -196,5 +205,6 @@ export {
     getMyRooms,
     addUserToRoom,
     removeUserFromRoom,
+    updateRole, // Don't forget to export the new controller
     exportRoomAsZip,
 };

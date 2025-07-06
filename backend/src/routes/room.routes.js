@@ -5,8 +5,8 @@ import {
     getRoomDetails,
     getMyRooms,
     addUserToRoom,
-    removeUserFromRoom,
-    exportRoomAsZip
+    removeUserFromRoom, updateRole,
+    exportRoomAsZip,
 } from '../controllers/room.controller.js';
 import { verifyJWT } from '../middlewares/auth.middleware.js';
 
@@ -34,5 +34,8 @@ router.route('/:roomId/participants/remove')
 // Route for exporting code
 router.route('/:roomId/export')
     .get(exportRoomAsZip);
+
+// Example route to add
+router.route('/:roomId/participants/role').patch(updateRole);
 
 export default router;

@@ -1,3 +1,11 @@
+/* You can REMOVE these old styles */
+/*
+.remote-selection { ... }
+.remote-cursor { ... }
+.remote-cursor-label { ... }
+*/
+
+/* Keep your @tailwind directives and any other custom styles */
 @tailwind base;
 @tailwind components;
 @tailwind utilities;

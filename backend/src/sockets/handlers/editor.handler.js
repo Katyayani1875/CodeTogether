@@ -1,69 +1,198 @@
-// src/sockets/handlers/editor.handler.js
 import { Room } from '../../models/room.model.js';
-
-// Map to hold debounce timers for each room, preventing excessive DB writes.
+import { fileURLToPath } from 'url';
 const debounceTimers = new Map();
+const activeCursors = new Map();
 
 export default (io, socket) => {
-    // Handler for when code is changed in the editor
+    // --- Code Change Handler (with debouncing) ---
     const codeChangeHandler = async ({ roomId, newCode }) => {
-        if (typeof newCode !== 'string') return; // Basic input validation
+        if (typeof newCode !== 'string') return;
 
-        // Broadcast change instantly for a fluid real-time experience
+        // Broadcast change instantly for real-time experience
         socket.to(roomId).emit('code-changed', {
             newCode,
-            changedBy: { _id: socket.user._id, username: socket.user.username }, // Metadata
+            changedBy: { _id: socket.user._id, username: socket.user.username }
         });
 
-        // Clear any existing timer for this room to reset the debounce period
+        // Debounce the database save operation
         if (debounceTimers.has(roomId)) {
             clearTimeout(debounceTimers.get(roomId));
         }
 
-        // Set a new timer to save the code after the user stops typing
         const timer = setTimeout(async () => {
             try {
                 await Room.findOneAndUpdate(
                     { roomId },
                     { 
                         codeContent: newCode,
-                        lastModifiedBy: socket.user._id // Track who made the last change
+                        lastModifiedBy: socket.user._id
                     }
                 );
-                io.in(roomId).emit('code-saved', { timestamp: new Date() }); // Notify clients of save
-                console.log(`[DB Write] Room ${roomId} saved by ${socket.user.username}.`);
+                io.in(roomId).emit('code-saved', { 
+                    timestamp: new Date(),
+                    savedBy: { _id: socket.user._id, username: socket.user.username }
+                });
             } catch (error) {
                 console.error(`[DB Error] Failed to save code for room ${roomId}:`, error);
-                // Optionally emit a save error to the client
-                socket.emit('error', { message: 'Failed to save your changes.' });
+                socket.emit('error', { 
+                    message: 'Failed to save changes',
+                    roomId
+                });
             } finally {
-                debounceTimers.delete(roomId); // Clean up the timer from the map
+                debounceTimers.delete(roomId);
             }
-        }, 1500); // Wait 1.5 seconds after the last keystroke to save
+        }, 1500);
 
         debounceTimers.set(roomId, timer);
     };
 
-    // Handler for real-time cursor position synchronization
-    const cursorChangeHandler = ({ roomId, cursorPosition }) => {
-        socket.to(roomId).emit('cursor-changed', {
+    // --- Cursor Position Handler ---
+    const cursorChangeHandler = ({ roomId, cursorPosition, isTyping = false }) => {
+        if (!roomId || !cursorPosition) return;
+
+        // Initialize room cursor map if it doesn't exist
+        if (!activeCursors.has(roomId)) {
+            activeCursors.set(roomId, new Map());
+        }
+        
+        const cursorData = {
+            position: cursorPosition,
             user: { _id: socket.user._id, username: socket.user.username },
-            cursorPosition,
+            isTyping,
+            lastUpdated: Date.now()
+        };
+        
+        // Update cursor data for this user
+        activeCursors.get(roomId).set(socket.user._id, cursorData);
+
+        // Broadcast to other users in the room
+        socket.to(roomId).emit('cursor-changed', cursorData);
+    };
+
+    // --- Selection Change Handler ---
+    const selectionChangeHandler = ({ roomId, selection }) => {
+        if (!roomId) return;
+
+        socket.to(roomId).emit('selection-changed', {
+            user: { _id: socket.user._id, username: socket.user.username },
+            selection: selection || null
         });
     };
 
-    // Handlers for typing indicators
-    const startTypingHandler = ({ roomId }) => {
-        socket.to(roomId).emit('user-typing-start', { userId: socket.user._id, username: socket.user.username });
+    // --- Typing Indicators ---
+   const startTypingHandler = ({ roomId, username }) => {
+    // Update cursor typing state
+    if (!activeCursors.has(roomId)) {
+        activeCursors.set(roomId, new Map());
+    }
+    
+    const cursorData = {
+        position: null, // or maintain last known position
+        user: { _id: socket.user._id, username: username || socket.user.username },
+        isTyping: true,
+        lastUpdated: Date.now()
+    };
+    
+    activeCursors.get(roomId).set(socket.user._id, cursorData);
+    
+    // Broadcast to room
+    socket.to(roomId).emit('user-typing-start', { 
+        userId: socket.user._id,
+        username: username || socket.user.username
+    });
+};
+
+const stopTypingHandler = ({ roomId, username }) => {
+    if (activeCursors.has(roomId)) {
+        const cursorData = activeCursors.get(roomId).get(socket.user._id);
+        if (cursorData) {
+            cursorData.isTyping = false;
+            cursorData.lastUpdated = Date.now();
+        }
+    }
+    
+    socket.to(roomId).emit('user-typing-stop', { 
+        userId: socket.user._id,
+        username: username || socket.user.username
+    });
+};
+const joinRoomHandler = ({ roomId }) => {
+    // Notify room about new user (except the joiner)
+    socket.to(roomId).emit('user-joined', {
+        userId: socket.user._id,
+        username: socket.user.username,
+        timestamp: new Date()
+    });
+    
+    // Send current participants to the new user
+    if (activeCursors.has(roomId)) {
+        const participants = Array.from(activeCursors.get(roomId).values())
+            .map(c => c.user)
+            .filter(u => u._id !== socket.user._id);
+        
+        socket.emit('current-participants', participants);
+    }
+};
+
+const leaveRoomHandler = ({ roomId }) => {
+    socket.to(roomId).emit('user-left', {
+        userId: socket.user._id,
+        username: socket.user.username,
+        timestamp: new Date()
+    });
+    
+    // Clean up cursors
+    if (activeCursors.has(roomId)) {
+        activeCursors.get(roomId).delete(socket.user._id);
+    }
+};
+
+
+    // --- Cleanup Handler ---
+    const cleanupHandler = () => {
+        activeCursors.forEach((roomCursors, roomId) => {
+            if (roomCursors.has(socket.user._id)) {
+                roomCursors.delete(socket.user._id);
+                io.to(roomId).emit('cursor-removed', {
+                    userId: socket.user._id
+                });
+            }
+        });
     };
 
-    const stopTypingHandler = ({ roomId }) => {
-        socket.to(roomId).emit('user-typing-stop', { userId: socket.user._id });
-    };
+    // --- Request Cursors Handler ---
+    socket.on('request-cursors', ({ roomId }) => {
+        if (activeCursors.has(roomId)) {
+            const cursors = Array.from(activeCursors.get(roomId).values())
+                .filter(cursor => cursor.user._id !== socket.user._id);
+            
+            socket.emit('existing-cursors', {
+                roomId,
+                cursors
+            });
+        }
+    });
 
-    // Register all event listeners for this socket
+    // Register event listeners
     socket.on('code-change', codeChangeHandler);
     socket.on('cursor-change', cursorChangeHandler);
-    socket.on('start-typing', startTypingHandler);
-    socket.on('stop-typing', stopTypingHandler);
+    socket.on('selection-change', selectionChangeHandler);
+    socket.on('user-typing-start', startTypingHandler);  // Changed from 'start-typing'
+    socket.on('user-typing-stop', stopTypingHandler);
+    socket.on('join-room', joinRoomHandler);
+    socket.on('leave-room', leaveRoomHandler);
+    socket.on('disconnect', cleanupHandler);
+
+    // Clean up inactive cursors every 30 seconds
+    setInterval(() => {
+        const now = Date.now();
+        activeCursors.forEach((roomCursors, roomId) => {
+            roomCursors.forEach((cursorData, userId) => {
+                if (now - cursorData.lastUpdated > 30000) {
+                    roomCursors.delete(userId);
+                    io.to(roomId).emit('cursor-removed', { userId });
+                }
+            });
+        });
+    }, 30000);
 };

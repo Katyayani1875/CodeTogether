@@ -6,15 +6,22 @@ import jwt from 'jsonwebtoken';
 const userSchema = new mongoose.Schema({
     username: { type: String, required: true, unique: true, trim: true, index: true },
     email: { type: String, required: true, unique: true, trim: true },
-    password: { type: String, required: true },
+    password: { type: String, required: false },
+     googleId: { type: String, unique: true, sparse: true },
 }, { timestamps: true });
 
 // Hash password before saving
 userSchema.pre('save', async function (next) {
-    if (!this.isModified('password')) return next();
+    if (!this.isModified('password') || !this.password) return next();
     this.password = await bcrypt.hash(this.password, 10);
     next();
 });
+
+// userSchema.pre('save', async function (next) {
+//     if (!this.isModified('password')) return next();
+//     this.password = await bcrypt.hash(this.password, 10);
+//     next();
+// });
 
 // Method to check if password is correct
 userSchema.methods.isPasswordCorrect = async function (password) {
